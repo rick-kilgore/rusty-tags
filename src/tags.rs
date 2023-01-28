@@ -7,7 +7,7 @@ use scoped_threadpool::Pool;
 use fnv::FnvHashSet;
 
 use rt_result::RtResult;
-use types::{TagsKind, SourceWithTmpTags, Sources, DepTree, unique_sources};
+use types::{TagsKind, SourceWithTmpTags, Sources, DepTree, convert_path_vec, unique_sources};
 use config::Config;
 use dirs::rusty_tags_cache_dir;
 
@@ -73,17 +73,17 @@ pub fn update_tags(config: &Config, dep_tree: &DepTree) -> RtResult<()> {
         thread_pool.scoped(|scoped| {
             for &SourceWithTmpTags { ref source, ref tags_file, .. } in &sources_to_update {
                 scoped.execute(move || {
-                    create_tags(config, &[&source.dir], tags_file.as_path()).unwrap();
+                    create_tags(config, &source.dirs, tags_file.as_path()).unwrap();
                 });
             }
         });
     } else {
         for &SourceWithTmpTags { ref source, ref tags_file, .. } in &sources_to_update {
-            create_tags(config, &[&source.dir], tags_file.as_path())?;
+            create_tags(config, &source.dirs, tags_file.as_path())?;
         }
     }
 
-    // Creates the cacheable tags of each source in 'sources_to_update'. The cacheable
+    // Creates the cachable tags of each source in 'sources_to_update'. The cachable
     // tags contain the tags of the source and the tags of the public exported dependencies.
     // Furthermore creates the final tags of each source in 'sources_to_update'. The
     // final tags contain the tags of the source and of all direct dependencies.
@@ -113,7 +113,7 @@ pub fn update_tags(config: &Config, dep_tree: &DepTree) -> RtResult<()> {
         // might also contain the tags of dependencies if they're
         // reexported
         {
-            let reexported_crates = find_reexported_crates(&source.dir)?;
+            let reexported_crates = find_reexported_crates(convert_path_vec(&source.dirs))?;
 
             if ! reexported_crates.is_empty() && config.verbose {
                 println!("\nFound public reexports in '{}' of:", source.name);
@@ -163,7 +163,7 @@ pub fn update_tags(config: &Config, dep_tree: &DepTree) -> RtResult<()> {
                 })
                 .collect();
 
-            let tmp_src_and_dep_tags = NamedTempFile::new_in(&source.dir)?;
+            let tmp_src_and_dep_tags = NamedTempFile::new_in(&source.dirs[0])?;
             if ! dep_tags_files.is_empty() {
                 merge_tags(config, tmp_src_tags, &dep_tags_files, tmp_src_and_dep_tags.path())?;
             } else {
@@ -200,6 +200,7 @@ pub fn create_tags<P1, P2>(config: &Config, src_dirs: &[P1], tags_file: P2) -> R
         }
 
         println!("\n   cached at:\n      {}", tags_file.as_ref().display());
+        println!("running command:  {:?}", cmd);
     }
 
     let output = cmd.output()
@@ -341,7 +342,9 @@ type CrateName = String;
 
 /// searches in the file `<src_dir>/lib.rs` for external crates
 /// that are reexpored and returns their names
-fn find_reexported_crates(src_dir: &Path) -> RtResult<Vec<CrateName>> {
+fn find_reexported_crates(src_dirs: Vec<&Path>) -> RtResult<Vec<CrateName>> {
+  let mut reexp_crates = Vec::<CrateName>::new();
+  for src_dir in src_dirs {
     let lib_file = src_dir.join("lib.rs");
     if ! lib_file.is_file() {
         return Ok(Vec::new());
@@ -390,12 +393,12 @@ fn find_reexported_crates(src_dir: &Path) -> RtResult<Vec<CrateName>> {
         }
     }
 
-    let mut reexp_crates = Vec::<CrateName>::new();
     for extern_crate in extern_crates.iter() {
         if pub_uses.contains(extern_crate.as_name) {
             reexp_crates.push(extern_crate.name.to_string());
         }
     }
+  }
 
-    Ok(reexp_crates)
+  Ok(reexp_crates)
 }

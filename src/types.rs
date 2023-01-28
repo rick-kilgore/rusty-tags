@@ -256,6 +256,10 @@ impl Drop for SourceLock {
     }
 }
 
+pub fn convert_path_vec<'a>(src: &'a Vec<PathBuf>) -> Vec<&'a Path> {
+  src.iter().map(|pb| { let p: &'a Path = pb; p }).collect::<Vec<&'a Path>>()
+}
+
 #[derive(Debug)]
 pub struct Source {
     /// rusty-tags specific internal id of the source
@@ -267,8 +271,8 @@ pub struct Source {
     /// the 'Cargo.toml' version of the source
     pub version: Version,
 
-    /// the root source directory
-    pub dir: PathBuf,
+    /// the root source directories
+    pub dirs: Vec<PathBuf>,
 
     /// hash of 'dir'
     pub hash: String,
@@ -296,7 +300,8 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn new(id: SourceId, source_version: &SourceVersion, dir: &Path, is_root: bool, config: &Config) -> RtResult<Source> {
+    pub fn new(id: SourceId, source_version: &SourceVersion, dirs: Vec<PathBuf>, is_root: bool, config: &Config) -> RtResult<Source> {
+        let dir: &Path = &dirs[0];
         let tags_dir = find_dir_upwards_containing("Cargo.toml", dir).unwrap_or(dir.to_path_buf());
         let tags_file = tags_dir.join(config.tags_spec.file_name());
         let hash = source_hash(dir);
@@ -311,7 +316,7 @@ impl Source {
             max_depth: None,
             name: source_version.name.to_owned(),
             version: source_version.version.clone(),
-            dir: dir.to_owned(),
+            dirs: dirs,
             hash: hash,
             is_root: is_root,
             tags_file: tags_file,
@@ -369,6 +374,7 @@ impl Source {
 /// Temporary struct for the tags updating of the source. It's
 /// used to create and associate a temporary file to the source
 /// for its tags creation.
+#[derive(Debug)]
 pub struct SourceWithTmpTags<'a> {
     /// the source to update
     pub source: &'a Source,
@@ -402,22 +408,22 @@ impl Deref for SourceId {
 
 /// A temporary struct used for the reading of the result of 'cargo metadata'.
 #[derive(PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
-pub struct SourceVersion<'a> {
+pub struct SourceVersion {
     /// the 'Cargo.toml' name of the source
-    pub name: &'a str,
+    pub name: String,
 
     /// the 'Cargo.toml' version of the source
     pub version: Version
 }
 
-impl<'a> SourceVersion<'a> {
-    pub fn new(name: &'a str, version: Version) -> SourceVersion<'a> {
+impl<'a> SourceVersion {
+    pub fn new(name: String, version: Version) -> SourceVersion {
         SourceVersion { name, version }
     }
 
     /// Parses an id from 'cargo metadata' (e.g "dtoa 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)")
     /// into a 'SourceVersion'.
-    pub fn parse_from_id(id: &'a str) -> RtResult<SourceVersion<'a>> {
+    pub fn parse_from_id(id: String) -> RtResult<SourceVersion> {
         let mut split = id.split(' ');
         let name = split.next();
         if name == None {
@@ -430,24 +436,23 @@ impl<'a> SourceVersion<'a> {
             return Err(format!("Couldn't extract version from id: '{}'", id).into());
         }
         let version = version.unwrap();
-
-        Ok(SourceVersion::new(name, Version::parse(version)?))
+        Ok(SourceVersion::new(name.to_owned(), Version::parse(version)?))
     }
 }
 
-impl<'a> fmt::Debug for SourceVersion<'a> {
+impl<'a> fmt::Debug for SourceVersion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({}, {})", self.name, self.version)
     }
 }
 
-impl<'a> fmt::Display for SourceVersion<'a> {
+impl<'a> fmt::Display for SourceVersion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({}, {})", self.name, self.version)
     }
 }
 
-fn source_hash(source_dir: &Path) -> String {
+fn source_hash<P: AsRef<Path> + Hash>(source_dir: P) -> String {
     let mut hasher = DefaultHasher::new();
     source_dir.hash(&mut hasher);
     hasher.finish().to_string()

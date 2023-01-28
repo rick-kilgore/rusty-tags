@@ -1,4 +1,4 @@
-#[macro_use]
+// #[macro_use]
 
 macro_rules! info {
     ($config:ident, $fmt:expr) => {{

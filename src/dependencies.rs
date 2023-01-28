@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use serde_json;
 use fnv::FnvHashMap;
@@ -23,23 +23,24 @@ pub fn dependency_tree(config: &Config, metadata: &JsonValue) -> RtResult<DepTre
 
 fn workspace_members(metadata: &JsonValue) -> RtResult<Vec<SourceVersion>> {
     let members = as_array_from_value("workspace_members", metadata)?;
-    let mut source_versions = Vec::with_capacity(members.len());
+    let mut source_versions = Vec::with_capacity(members.len() * 2);
     for member in members {
         let member_str = member.as_str()
             .ok_or(format!("Expected 'workspace_members' of type string but found: {}", to_string_pretty(member)))?;
 
-        source_versions.push(SourceVersion::parse_from_id(member_str)?)
+        source_versions.push(SourceVersion::parse_from_id(member_str.to_owned())?)
     }
 
     Ok(source_versions)
 }
 
-struct Package<'a> {
+#[derive(Debug)]
+struct Package {
     pub source_id: SourceId,
-    pub source_path: &'a Path
+    pub source_paths: Vec<PathBuf>,
 }
 
-type Packages<'a> = FnvHashMap<SourceVersion<'a>, Package<'a>>;
+type Packages<'a> = FnvHashMap<SourceVersion, Package>;
 
 fn packages<'a>(config: &Config,
                 metadata: &'a JsonValue,
@@ -47,24 +48,29 @@ fn packages<'a>(config: &Config,
                 -> RtResult<Packages<'a>> {
     let packages = as_array_from_value("packages", metadata)?;
     dep_tree.reserve_num_sources(packages.len());
-    let mut package_map = FnvHashMap::default();
+    let mut package_map: Packages = FnvHashMap::default();
     for package in packages {
         let id = as_str_from_value("id", package)?;
-        let source_version = SourceVersion::parse_from_id(id)?;
 
-        let source_path = {
-            let path = source_path(config, package)?;
-            if path == None {
-                continue;
-            }
+        for dotarget in [ false, true ] {
+            let source_version = SourceVersion::parse_from_id(id.to_owned())?;
+            let source_path = {
+                let path = source_path(config, package, dotarget)?;
+                if path == None {
+                    continue;
+                }
 
-            path.unwrap()
-        };
+                path.unwrap()
+            };
 
-        verbose!(config, "Found package of {} with source at '{}'", source_version, source_path.display());
+            verbose!(config, "Found source {} for package {}", source_path.display(), source_version);
 
-        let source_id = dep_tree.new_source();
-        package_map.insert(source_version, Package { source_id, source_path });
+            package_map.entry(source_version).or_insert({
+              let source_id = dep_tree.new_source();
+              let source_paths = vec![];
+              Package { source_id, source_paths }
+            }).source_paths.push(source_path);
+        }
     }
 
     Ok(package_map)
@@ -86,7 +92,8 @@ fn build_dep_tree(config: &Config,
             if config.omit_deps {
                 let is_root = true;
                 let source = Source::new(member_package.source_id, member,
-                                         member_package.source_path, is_root, config)?;
+                                         member_package.source_paths.to_owned(),
+                                         is_root, config)?;
                 dep_tree.set_source(source, vec![]);
             }
         }
@@ -107,7 +114,7 @@ fn build_dep_tree(config: &Config,
     for node in nodes {
         let node_version = {
             let id = as_str_from_value("id", node)?;
-            SourceVersion::parse_from_id(id)?
+            SourceVersion::parse_from_id(id.to_owned())?
         };
 
         let node_package = package(&node_version, packages)?;
@@ -121,7 +128,7 @@ fn build_dep_tree(config: &Config,
                     let id = dep.as_str()
                         .ok_or(format!("Couldn't find string in dependency:\n{}", to_string_pretty(dep)))?;
 
-                    vers.push(SourceVersion::parse_from_id(id)?);
+                    vers.push(SourceVersion::parse_from_id(id.to_owned())?);
                 }
 
                 vers
@@ -142,26 +149,26 @@ fn build_dep_tree(config: &Config,
         verbose!(config, "Building tree for {}", node_version);
 
         let is_root = root_ids.iter().find(|id| **id == node_package.source_id) != None;
-        let source = Source::new(node_package.source_id, &node_version, node_package.source_path, is_root, config)?;
+        let source = Source::new(node_package.source_id, &node_version, node_package.source_paths.to_owned(), is_root, config)?;
         dep_tree.set_source(source, dep_ids);
     }
 
     Ok(())
 }
 
-fn package<'a>(source_version: &SourceVersion<'a>, packages: &'a Packages) -> RtResult<&'a Package<'a>> {
+fn package<'a>(source_version: &SourceVersion, packages: &'a Packages) -> RtResult<&'a Package> {
     packages.get(&source_version)
         .ok_or(format!("Couldn't find package for {}", source_version).into())
 }
 
-fn source_path<'a>(config: &Config, package: &'a JsonValue) -> RtResult<Option<&'a Path>> {
+fn source_path<'a>(config: &Config, package: &'a JsonValue, dotarget: bool) -> RtResult<Option<PathBuf>> {
     let targets = as_array_from_value("targets", package)?;
 
     let manifest_dir = {
-        let manifest_path = as_str_from_value("manifest_path", package).map(Path::new)?;
+        let manifest_path = as_str_from_value("manifest_path", package).map(PathBuf::from)?;
 
         manifest_path.parent()
-            .ok_or(format!("Couldn't get directory of path '{:?}'", manifest_path.display()))?
+            .ok_or(format!("Couldn't get directory of path '{:?}'", manifest_path.display()))?.to_path_buf()
     };
 
     for target in targets {
@@ -176,11 +183,17 @@ fn source_path<'a>(config: &Config, package: &'a JsonValue) -> RtResult<Option<&
                 continue;
             }
 
-            let mut src_path = as_str_from_value("src_path", target).map(Path::new)?;
+            let mut src_path = as_str_from_value("src_path", target).map(PathBuf::from)?;
             if src_path.is_absolute() && src_path.is_file() {
                 src_path = src_path.parent()
                     .ok_or(format!("Couldn't get directory of path '{:?}' in target:\n{}\nof package:\n{}",
-                                   src_path.display(), to_string_pretty(target), to_string_pretty(package)))?;
+                                   src_path.display(), to_string_pretty(target), to_string_pretty(package)))?.to_path_buf();
+                if dotarget {
+                    let pkg_path = src_path.parent()
+                        .ok_or(format!("Couldn't get package directory of path '{:?}' in target:\n{}\nof package:\n{}",
+                                       src_path.display(), to_string_pretty(target), to_string_pretty(package)))?.to_path_buf();
+                    src_path = pkg_path.join("target");
+                }
             }
 
             if src_path.is_relative() {
@@ -188,8 +201,7 @@ fn source_path<'a>(config: &Config, package: &'a JsonValue) -> RtResult<Option<&
             }
 
             if ! src_path.is_dir() {
-                return Err(format!("Invalid source path directory '{:?}' in target:\n{}\nof package:\n{}",
-                                   src_path.display(), to_string_pretty(target), to_string_pretty(package)).into());
+                return if dotarget { Ok(None) } else { Err(format!("Invalid source path directory '{:?}'", src_path.display()).into()) }
             }
 
             return Ok(Some(src_path));
